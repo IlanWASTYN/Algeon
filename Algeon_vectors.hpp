@@ -23,7 +23,7 @@ private:
     //
     MPI_Comm comm_;
     int rank_, size_;
-    std::size_t global_size_, local_size_, offset_;
+    std::size_t capacity_, global_size_, local_size_;
     std::vector<T> data_;
 
 public:
@@ -40,7 +40,7 @@ public:
         {
             // Master : pas de données locales
             local_size_ = 0;
-            offset_ = 0;
+            data_.resize(global_size_);
         }
 
         else
@@ -54,8 +54,7 @@ public:
             else
             {
                 // Distribution équitable entre workers uniquement
-                local_size_ = global_size_ / num_workers + ((rank_ - 1) < (global_size_ % num_workers) ? 1 : 0);
-                offset_ = (global_size_ / num_workers) * (rank_ - 1) + std::min<std::size_t>(rank_ - 1, global_size_ % num_workers);
+                local_size_ = global_size_ / num_workers;
 
                 data_.resize(local_size_);
             }
@@ -67,7 +66,8 @@ public:
     //
     std::size_t global_size() const { return global_size_; }
     std::size_t local_size() const { return local_size_; }
-    std::size_t offset() const { return offset_; }
+    const std::vector<T>& data() const { return data_; }
+    MPI_Comm comm() const { return comm_; }
 
     //
     // ─── ACCES AUX DONNEES LOCALES ─────────────────────────────────────────
@@ -83,42 +83,45 @@ public:
 
     ParallelVector<T> &operator=(const ParallelVector<T> &other)
     {
-        if (other.size_ > size_)
-        {
-            delete[] data_;
-            data_ = new T[other.size_];
-        }
-#pragma omp parallel for
-        for (std::size_t i = 0; i < other.size_; i++)
-        {
-            data_[i] = other.data_[i];
-        }
+        // Protéger contre l'auto-assignment
+        if (this == &other)
+            return *this;
+
+        // Copier les attributs de base
+        comm_ = other.comm_;
+        rank_ = other.rank_;
         size_ = other.size_;
-        return *this;
-    }
-    void fill(const T &value)
-    {
-        if (rank_ == 0)
-            return;
+        global_size_ = other.global_size_;
+        local_size_ = other.local_size_;
+        capacity_ = other.capacity_; // si tu l'utilises
+
+        // Copier les données locales uniquement
+        data_.resize(other.data_.size());
 
 #pragma omp parallel for
-        for (std::size_t i = 0; i < local_size_; i++)
-            data_[i] = value;
+        for (std::size_t i = 0; i < other.data_.size(); ++i)
+            data_[i] = other.data_[i];
+
+        return *this;
     }
 
     //
     // ─── ENVOIS ENTRE PROCESSUS ────────────────────────────────────────────────
     //
-    void distribute_from_master(const std::vector<T> &global_data = {})
+    void distribute_from_master()
     {
+        std::size_t chunk_size = global_size_ / (size_ - 1); // Taille de chaque morceau envoyé
+
         if (rank_ == 0)
         {
-            assert(global_data.size() == global_size_);
-            for (int r = 1; r < size_; ++r)
+            // Assure que le vecteur data_ du master contient bien toutes les données
+            assert(data_.size() == global_size_);
+
+            for (int r = 1; r < size_; r++)
             {
-                std::size_t send_size = global_size_ / (size_ - 1) + ((r - 1) < (global_size_ % (size_ - 1)) ? 1 : 0);
-                std::size_t offset = (global_size_ / (size_ - 1)) * (r - 1) + std::min<std::size_t>(r - 1, global_size_ % (size_ - 1));
-                MPI_Send(global_data.data() + offset, send_size, mpi_type<T>(), r, 0, comm_);
+                const T *send_ptr = data_.data() + (r - 1) * chunk_size;
+
+                MPI_Send(send_ptr, chunk_size, mpi_type<T>(), r, 0, comm_);
             }
         }
         else
@@ -127,77 +130,80 @@ public:
         }
     }
 
-    void gather_to_master(std::vector<T> &global_data) const
+    void gather_to_master()
     {
+        std::size_t chunk_size = global_size_ / (size_ - 1); // Taille de chaque morceau envoyé
+
         if (rank_ == 0)
         {
-            global_data.resize(global_size_);
-            for (int r = 1; r < size_; ++r)
+            // Assure que le vecteur data_ du master contient bien toutes les données
+            assert(data_.size() == global_size_);
+
+            for (int r = 1; r < size_; r++)
             {
-                std::size_t recv_size = global_size_ / (size_ - 1) + ((r - 1) < (global_size_ % (size_ - 1)) ? 1 : 0);
-                std::size_t offset = (global_size_ / (size_ - 1)) * (r - 1) + std::min<std::size_t>(r - 1, global_size_ % (size_ - 1));
-                MPI_Recv(global_data.data() + offset, recv_size, mpi_type<T>(), r, 1, comm_, MPI_STATUS_IGNORE);
+                T *recv_ptr = data_.data() + (r - 1) * chunk_size;
+                MPI_Recv(recv_ptr, chunk_size, mpi_type<T>(), r, 0, comm_, MPI_STATUS_IGNORE);
             }
         }
         else
         {
-            MPI_Send(data_.data(), local_size_, mpi_type<T>(), 0, 1, comm_);
+            MPI_Send(data_.data(), local_size_, mpi_type<T>(), 0, 0, comm_);
         }
     }
 
     //
-    // ─── OPERATEUR DE SOMME VECTORIELLE ─────────────────────────────────────────────────
+    // ─── RESIZE ─────────────────────────────────────────
     //
-    ParallelVector<T> operator+(const ParallelVector<T> &other) const
+    void resize(size_t new_capacity_)
     {
-        assert(global_size_ == other.global_size_);
-        ParallelVector<T> result(comm_, global_size_);
-        if (rank_ != 0)
-        {
-            assert(local_size_ == other.local_size_);
-#pragma omp parallel for
-            for (std::size_t i = 0; i < local_size_; ++i)
-                result.data_[i] = data_[i] + other.data_[i];
-        }
-
-        return result;
+        double *new_data_ = new double[new_capacity_];
+        for (size_t i = 0; i < global_size_; ++i)
+            new_data_[i] = data_[i];
+        delete[] data_;
+        data_ = new_data_;
+        capacity_ = new_capacity_;
     }
 
     //
-    // ─── OPERATEUR DE SOUSTRACTION VECTORIELLE ──────────────────────────────────────────
+    // ─── PUSHBACK ─────────────────────────────────────────
     //
-    ParallelVector<T> operator-(const ParallelVector<T> &other) const
+    void push_back(int target_rank_, const T &value_)
     {
-        assert(global_size_ == other.global_size_);
-        ParallelVector<T> result(comm_, global_size_);
-
-        if (rank_ != 0)
+        if (rank_ == target_rank_)
         {
-            assert(local_size_ == other.local_size_);
-#pragma omp parallel for
-            for (std::size_t i = 0; i < local_size_; ++i)
-                result.data_[i] = data_[i] - other.data_[i];
+            data_.push_back(value_);
+            local_size_ = data_.size();
         }
-
-        return result;
     }
 
     //
     // ─── AFFICHAGE ─────────────────────────────────────────
     //
-    void print_local_data_per_proc(const std::string &label = "Vecteur") const
+    void display(const std::string &label = "Vecteur") const
     {
         for (int r = 0; r < size_; r++)
         {
             MPI_Barrier(comm_); // Synchronisation
             if (rank_ == r)
             {
-                std::cout << "[Proc " << rank_ << "] " << label << " local : ";
-                for (std::size_t i = 0; i < local_size_; ++i)
+                if (rank_ == 0)
                 {
-                    std::cout << data_[i] << " ";
+                    std::cout << "[Proc " << rank_ << "] " << label << " global : ";
+                    for (std::size_t i = 0; i < global_size_; ++i)
+                    {
+                        std::cout << data_[i] << " ";
+                    }
+                    std::cout << std::endl;
                 }
-                std::cout << std::endl;
+                else
+                {
+                    std::cout << "[Proc " << rank_ << "] " << label << " local : ";
+                    for (std::size_t i = 0; i < local_size_; ++i)
+                    {
+                        std::cout << data_[i] << " ";
+                    }
+                    std::cout << std::endl;
+                }
             }
         }
         MPI_Barrier(comm_); // Synchronisation finale
@@ -207,17 +213,28 @@ public:
 //
 // ─── SOMME DISTRIBUEE ─────────────────────────────────────────────────
 //
-/*ParallelVector<T> Add(const ParallelVector<T> &a, const ParallelVector<T> &b) const
+template <typename T>
+ParallelVector<T> add(const ParallelVector<T> &a, const ParallelVector<T> &b)
 {
-    assert(global_size_ == other.global_size_);
-    ParallelVector<T> result(comm_, global_size_);
-    if (rank_ != 0)
+    assert(a.global_size() == b.global_size());
+
+    MPI_Comm comm = a.comm(); // Récupère le communicateur commun
+    int rank;
+    MPI_Comm_rank(comm, &rank);
+
+    std::size_t global_size = a.global_size();
+    ParallelVector<T> result(comm, global_size);
+
+    if (rank != 0)
     {
-        assert(local_size_ == other.local_size_);
+        assert(a.local_size() == b.local_size());
+
 #pragma omp parallel for
-        for (std::size_t i = 0; i < local_size_; ++i)
-            result.data_[i] = data_[i] + other.data_[i];
+        for (std::size_t i = 0; i < a.local_size(); ++i)
+            result.local_data()[i] = a.local_data()[i] + b.local_data()[i];
     }
+
+    result.gather_to_master(); // Version interne sans paramètre
 
     return result;
 }
@@ -225,17 +242,28 @@ public:
 //
 // ─── SOUSTRACTION DISTRIBUEE ─────────────────────────────────────────────────
 //
-ParallelVector<T> Substract(const ParallelVector<T> &other) const
+template <typename T>
+ParallelVector<T> substract(const ParallelVector<T> &a, const ParallelVector<T> &b)
 {
-    assert(global_size_ == other.global_size_);
-    ParallelVector<T> result(comm_, global_size_);
-    if (rank_ != 0)
+    assert(a.global_size() == b.global_size());
+
+    MPI_Comm comm = a.comm(); // Récupère le communicateur commun
+    int rank;
+    MPI_Comm_rank(comm, &rank);
+
+    std::size_t global_size = a.global_size();
+    ParallelVector<T> result(comm, global_size);
+
+    if (rank != 0)
     {
-        assert(local_size_ == other.local_size_);
+        assert(a.local_size() == b.local_size());
+
 #pragma omp parallel for
-        for (std::size_t i = 0; i < local_size_; ++i)
-            result.data_[i] = data_[i] + other.data_[i];
+        for (std::size_t i = 0; i < a.local_size(); ++i)
+            result.local_data()[i] = a.local_data()[i] - b.local_data()[i];
     }
+
+    result.gather_to_master(); // Version interne sans paramètre
 
     return result;
 }
@@ -243,23 +271,23 @@ ParallelVector<T> Substract(const ParallelVector<T> &other) const
 //
 // ─── PRODUIT SCALAIRE DISTRIBUEE ────────────────────────────────────────
 //
-T dot(const ParallelVector<T> &other) const
+template<typename T>
+T dot(const ParallelVector<T>& a, const ParallelVector<T>& b)
 {
-    assert(local_size_ == other.local_size_);
+    assert(a.global_size() == b.global_size());
+    assert(a.local_size() == b.local_size());
 
-    T local_dot = 0.0;
+    T local_dot = 0;
 
-    if (rank_ != 0)
-    {
-#pragma omp parallel for reduction(+ : local_dot)
-        for (std::size_t i = 0; i < local_size_; ++i)
-            local_dot += data_[i] * other.data_[i];
-    }
+    #pragma omp parallel for reduction(+:local_dot)
+    for (std::size_t i = 0; i < a.local_size(); ++i)
+        local_dot += a.data()[i] * b.data()[i];
 
-    T global_dot = 0.0;
-    MPI_Reduce(&local_dot, &global_dot, 1, mpi_type<T>(), MPI_SUM, 0, comm_);
-    return global_dot; // seulement significatif sur rank 0
-}*/
+    T global_dot = 0;
+    MPI_Reduce(&local_dot, &global_dot, 1, mpi_type<T>(), MPI_SUM, 0, a.comm());
+
+    return global_dot;
+}
 
 //
 // ─── NORME DISTRIBUEE ────────────────────────────────────────
