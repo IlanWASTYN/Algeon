@@ -54,7 +54,7 @@ public:
             else
             {
                 // Distribution équitable entre workers uniquement
-                local_size_ = global_size_ / num_workers;
+                local_size_ = global_size_;
 
                 data_.resize(local_size_);
             }
@@ -66,7 +66,7 @@ public:
     //
     std::size_t global_size() const { return global_size_; }
     std::size_t local_size() const { return local_size_; }
-    const std::vector<T>& data() const { return data_; }
+    const std::vector<T> &data() const { return data_; }
     MPI_Comm comm() const { return comm_; }
 
     //
@@ -126,7 +126,8 @@ public:
         }
         else
         {
-            MPI_Recv(data_.data(), local_size_, mpi_type<T>(), 0, 0, comm_, MPI_STATUS_IGNORE);
+            std::size_t offset = (rank_ - 1) * chunk_size;
+            MPI_Recv(data_.data() + offset, chunk_size, mpi_type<T>(), 0, 0, comm_, MPI_STATUS_IGNORE);
         }
     }
 
@@ -141,13 +142,15 @@ public:
 
             for (int r = 1; r < size_; r++)
             {
+                std::size_t recv_size = (r == size_ - 1) ? (global_size_ - (size_ - 2) * chunk_size) : chunk_size;
                 T *recv_ptr = data_.data() + (r - 1) * chunk_size;
-                MPI_Recv(recv_ptr, chunk_size, mpi_type<T>(), r, 0, comm_, MPI_STATUS_IGNORE);
+                MPI_Recv(recv_ptr, recv_size, mpi_type<T>(), r, 0, comm_, MPI_STATUS_IGNORE);
             }
         }
         else
         {
-            MPI_Send(data_.data(), local_size_, mpi_type<T>(), 0, 0, comm_);
+            std::size_t offset = (rank_ - 1) * chunk_size;
+            MPI_Send(data_.data() + offset, chunk_size, mpi_type<T>(), 0, 0, comm_);
         }
     }
 
@@ -234,7 +237,7 @@ ParallelVector<T> add(const ParallelVector<T> &a, const ParallelVector<T> &b)
             result.local_data()[i] = a.local_data()[i] + b.local_data()[i];
     }
 
-    result.gather_to_master(); // Version interne sans paramètre
+    result.gather_to_master();
 
     return result;
 }
@@ -271,15 +274,15 @@ ParallelVector<T> substract(const ParallelVector<T> &a, const ParallelVector<T> 
 //
 // ─── PRODUIT SCALAIRE DISTRIBUEE ────────────────────────────────────────
 //
-template<typename T>
-T dot(const ParallelVector<T>& a, const ParallelVector<T>& b)
+template <typename T>
+T dot(const ParallelVector<T> &a, const ParallelVector<T> &b)
 {
     assert(a.global_size() == b.global_size());
     assert(a.local_size() == b.local_size());
 
     T local_dot = 0;
 
-    #pragma omp parallel for reduction(+:local_dot)
+#pragma omp parallel for reduction(+ : local_dot)
     for (std::size_t i = 0; i < a.local_size(); ++i)
         local_dot += a.data()[i] * b.data()[i];
 
@@ -309,3 +312,49 @@ T norm(const ParallelVector<T> &a)
     global_norm = sqrt(global_norm);
     return global_norm; // seulement significatif sur rank 0
 }*/
+
+//
+// ─── PREPARE VECTEUR POUR MULTIPLICATION ────────────────────────────────────────
+//
+
+template <typename T>
+ParallelVector<T> prepare(ParallelVector<T> x)
+{
+
+    MPI_Comm comm = x.comm();
+    int rank, size;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    std::size_t global_size = x.global_size();
+    ParallelVector<T> result(comm, global_size);
+
+    result = x;
+
+    int left = rank - 1;
+    int right = rank + 1;
+
+    std::size_t chunk_size = global_size / (size - 1);
+    std::size_t data_ptr = (rank - 1) * chunk_size;
+
+    if (rank == 1)
+    {
+        MPI_Send(&result[chunk_size - 1], 1, mpi_type<T>(), right, 0, comm);
+        MPI_Recv(&result[chunk_size], 1, mpi_type<T>(), right, 0, comm, MPI_STATUS_IGNORE);
+    }
+    else if (rank == size - 1)
+    {
+        MPI_Recv(&result[global_size - chunk_size - 1], 1, mpi_type<T>(), left, 0, comm, MPI_STATUS_IGNORE);
+        MPI_Send(&result[global_size - chunk_size], 1, mpi_type<T>(), left, 0, comm);
+    }
+    else if (rank != 0)
+    {
+        MPI_Recv(&result[data_ptr - 1], 1, mpi_type<T>(), left, 0, comm, MPI_STATUS_IGNORE);
+        MPI_Send(&result[data_ptr], 1, mpi_type<T>(), left, 0, comm);
+
+        MPI_Send(&result[data_ptr + 1], 1, mpi_type<T>(), right, 0, comm);
+        MPI_Recv(&result[data_ptr + 2], 1, mpi_type<T>(), right, 0, comm, MPI_STATUS_IGNORE);
+    }
+
+    return result;
+}

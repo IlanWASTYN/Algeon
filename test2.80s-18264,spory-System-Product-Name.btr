@@ -1,0 +1,18 @@
+
+test2:18264 terminated with signal 6 at PC=789465a969fc SP=7fff8c6cdfc0.  Backtrace:
+/lib/x86_64-linux-gnu/libc.so.6(pthread_kill+0x12c)[0x789465a969fc]
+/lib/x86_64-linux-gnu/libc.so.6(raise+0x16)[0x789465a42476]
+/lib/x86_64-linux-gnu/libc.so.6(abort+0xd3)[0x789465a287f3]
+/lib/x86_64-linux-gnu/libstdc++.so.6(+0xa2b9e)[0x789465ea2b9e]
+/lib/x86_64-linux-gnu/libstdc++.so.6(+0xae20c)[0x789465eae20c]
+/lib/x86_64-linux-gnu/libstdc++.so.6(+0xae277)[0x789465eae277]
+/lib/x86_64-linux-gnu/libstdc++.so.6(+0xae4d8)[0x789465eae4d8]
+/lib/x86_64-linux-gnu/libstdc++.so.6(+0xa54cd)[0x789465ea54cd]
+./test2(+0x568f)[0x5e7e3d2d768f]
+./test2(+0x4513)[0x5e7e3d2d6513]
+./test2(+0x34f3)[0x5e7e3d2d54f3]
+./test2(+0x3c9a)[0x5e7e3d2d5c9a]
+./test2(+0x2b8b)[0x5e7e3d2d4b8b]
+/lib/x86_64-linux-gnu/libc.so.6(+0x29d90)[0x789465a29d90]
+/lib/x86_64-linux-gnu/libc.so.6(__libc_start_main+0x80)[0x789465a29e40]
+./test2(+0x2665)[0x5e7e3d2d4665]

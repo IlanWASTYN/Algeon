@@ -1,28 +1,26 @@
 # Nom de l'exécutable
-TARGET = algeon
+EXEC = test2
 
 # Fichiers source
-SRC = test.cpp
+SRC = test2.cpp
 
-# Compilateur MPI + OpenMP
-CXX = mpicxx
+# Compilateur et options
+CXX = mpic++
+CXXFLAGS = -O2 -Wall -fopenmp
 
-# Flags de compilation
-CXXFLAGS = -O2 -fopenmp -std=c++17 -Wall -Wextra
-
-# Nombre de processus MPI par défaut
+# Nombre de processus MPI (par défaut 4)
 NP ?= 4
 
-# ─────────── Cibles ───────────
-all: $(TARGET)
+# Règle principale
+all: $(EXEC)
 
-$(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+$(EXEC): $(SRC) Algeon_matrix.hpp
+	$(CXX) $(CXXFLAGS) $(SRC) -o $(EXEC)
 
-# Exécution avec MPI
-run: $(TARGET)
-	mpirun -np $(NP) ./$(TARGET)
+# Exécution avec NP processus
+run: $(EXEC)
+	mpirun -np $(NP) ./$(EXEC)
 
 # Nettoyage
 clean:
-	rm -f $(TARGET)
+	rm -f $(EXEC)
